@@ -1,0 +1,618 @@
+---
+title: "Bonus Episode: Drop-in Replacements for Faster NumPy and Pandas"
+teaching: 30
+exercises: 20
+---
+
+:::::::::::::::::::::::::::::::::::::: questions
+
+- What is a GPU?
+- How can I run NumPy code on a GPU with almost no changes?
+- How can I speed up Pandas by using all my CPU cores?
+- Why do these tools make some code faster and not others?
+
+::::::::::::::::::::::::::::::::::::::::::::::::
+
+::::::::::::::::::::::::::::::::::::: objectives
+
+- Understand what a GPU is and when using one will (and won't) help with performance.
+- Able to swap NumPy (and some SciPy) for DPNP, and know when CuPy is the better choice.
+- Able to swap Pandas for Modin and explain how it differs from GPU acceleration.
+- Able to time GPU and Modin code correctly, by waiting for the work to finish.
+
+::::::::::::::::::::::::::::::::::::::::::::::::
+
+::::::::::::::::::::::::::::::::::::: instructor
+
+- This episode introduces two "drop-in replacement" libraries, where changing an `import` line is enough to move work onto different hardware:
+
+  - [DPNP](https://intelpython.github.io/dpnp/) runs NumPy code on Intel GPUs, including the integrated graphics found in most Intel laptops.
+  - [Modin](https://modin.readthedocs.io/) runs Pandas code across all CPU cores (it does **not** use the GPU).
+
+- **We choose to use DPNP as it's support for integrated graphics.** This was a deliberate choice as provides the widest range of hardware support and allows most users to use there own laptops to run the examples (sorry MacOs people). However, the examples and principles used in this material are fully transferable to and were tested with CuPY, you only need to change a few lines. So if you want to teach it with dedicated graphics hardware you can.
+
+- In a similar vain we choose to use Modlin as, although its CPU only, it works everywhere, (CudaDF is good but currently only supports Nvidia) and it shares many of the same principles. That is change 1 import, has a measurable startup cost and only works well on certain workloads ect.
+
+- GPU programming is a massive topic in its own right and this episode only scratches the surface. Writing your own GPU kernels (e.g. with Numba or custom CuPy kernels) is possible but has been deliberately left out.
+
+- **Performance results are very hardware dependent and can vary wildly.** The outputs shown were recorded on a single laptop (see the callout near the start of the episode). On that machine the integrated GPU gave a useful speed-up for heavier calculations (FFTs, linear algebra) but not for simple element-wise maths, while the dedicated NVIDIA GPU was dramatically faster at everything. Learners' results will differ, sometimes a lot; this is a teaching point, not a failure.
+
+- **Displays can compete with integrated GPUs.** An integrated GPU also draws the desktop. While preparing this episode, using fractional display scaling on a high-resolution external monitor left the integrated GPU with under 10% of its normal compute speed, and slowed NumPy by around 3x as well. This was due to the memory bandwidth used to draw the screens. Turning scaling off restored full performance. If a learner's integrated GPU results look far worse than expected, you may wish to check whether they are using display scaling.
+
+::::::::::::::::::::::::::::::::::::::::::::::::
+
+## What is a GPU and why should I care?
+
+Until now you have likely never had to give a second thought to what computer hardware is running your Python code. Most Python code runs on the computer's central processing unit (CPU). This can be thought of as the brain of your computer and is a computational "Swiss army knife".
+
+CPUs are great for general purpose work, especially things that are sequential (one instruction followed by another), and they can even handle a modest amount of parallel work (running multiple instructions simultaneously). A typical laptop CPU has somewhere between 4 and 16 cores, so it can only work on that many things at the same time.
+
+CPUs are also largely manufacturer agonistic, by which we mean 1 CPU will generally run the same software as another and perform roughly the same job, with only a slight difference in performance.
+
+Graphics processing units (GPUs) by comparison are specialised processors designed for doing calculations in parallel. They were originally designed for graphics processing (hence the name) but these days have the ability to do more general calculations.
+
+A GPU contains hundreds or thousands of small, simple cores that can all work on the same calculation at once in parallel. Thus If you have the same operation that needs to be done thousands (or even millions) of times, a GPU can be a huge help.
+
+There is however, a catch: the GPU usually has its own separate memory, so data must be copied to it before it can work, and copied back afterwards. Starting work on the GPU also has a small  fixed "startup" cost. Therefore a GPU only wins when there is lots of data with *a lot* of work to do on each piece.
+
+GPUs also vary between (and sometimes even within) manufactures as to what hardware and software they support. Whilst, we have tried our best to support the most common hardware setups, we cannot guarantee that every GPU will be able to work with all the examples in this episode. Therefore a good rule to follow is to always test and measure on *your* hardware before deciding if a change was worth it.
+
+The example outputs shown were recorded on a laptop with:
+
+- an Intel Core i7-12800H CPU (14 cores),
+- Intel UHD integrated graphics,
+- an NVIDIA T600 laptop GPU with 4 GB of memory,
+- Linux using Python 3.12.
+
+A more powerful integrated GPU, or a dedicated graphics card, may show very different results.
+
+## Change one import: NumPy on the GPU with DPNP
+
+[DPNP](https://intelpython.github.io/dpnp/) (the Data Parallel Extension for NumPy) is a library from Intel that copies the NumPy interface, but runs the work on a GPU. Because the functions have the same names, existing NumPy code can often be moved to the GPU by changing a single import.
+ 
+::::::::::::::::::::::::::::::::::::: callout
+
+## Will DPNP work on my laptop?
+
+Note DPNP requires:
+
+- Linux or Windows (unfortunately there is no macOS version),
+- an Intel GPU (most Intel laptops from the last few years have integrated graphics that qualify),
+- an up-to-date Intel graphics driver (see the [setup page](../learners/setup.md)).
+
+You can check whether DPNP can see your GPU by running:
+
+```sh
+python -m dpctl --full-list
+```
+
+If a device is listed you are ready to go.
+
+Note: If you have a Mac or otherwise dont have Intel graphics, we have provided sample outputs so you can follow along.
+Also if you have an NVIDIA graphics card (or, on Linux, a supported AMD card), you can use CuPy instead (see below). Note: The Modin section later in the episode works on any laptop.
+
+:::::::::::::::::::::::::::::::::::::::::::::
+
+As an example, the following code smooths a large 4096×4096 greyscale "image" by converting it into frequencies with a Fast Fourier Transform (FFT), removing the high frequencies and converting it back.
+
+```python
+import numpy as np
+from timeit import timeit
+
+N = 4096
+np.random.seed(42)
+image = np.random.random((N, N)).astype(np.float32)
+
+def smooth(image):
+    freq = np.fft.fft2(image)               # convert to frequencies
+    freq[N // 8 : -N // 8, :] = 0           # remove high frequencies
+    freq[:, N // 8 : -N // 8] = 0
+    return np.fft.ifft2(freq).real          # convert back to an image
+
+repeats = 10
+print(f"smooth: {timeit(lambda: smooth(image), number=repeats) / repeats:.3f} s")
+```
+
+```output
+smooth: 0.855 s
+```
+
+To run this on the GPU, we change `import numpy as np` to `import dpnp as np`. Everything else stays the same, apart from one extra line which we will explain shortly.
+
+```python
+import dpnp as np
+from timeit import timeit
+
+N = 4096
+np.random.seed(42)
+image = np.random.random((N, N)).astype(np.float32)
+
+def smooth(image):
+    freq = np.fft.fft2(image)               # convert to frequencies
+    freq[N // 8 : -N // 8, :] = 0           # remove high frequencies
+    freq[:, N // 8 : -N // 8] = 0
+    result = np.fft.ifft2(freq).real        # convert back to an image
+    result.sycl_queue.wait()                # wait for the GPU to finish
+    return result
+
+smooth(image)  # warm-up run
+repeats = 10
+print(f"smooth: {timeit(lambda: smooth(image), number=repeats) / repeats:.3f} s")
+```
+
+```output
+smooth: 0.228 s
+```
+
+Almost 4x faster, from changing one line!
+
+Because `np.random.random()` is now DPNP's version, `image` is created directly in the GPU's memory, and every operation on it runs on the GPU. The results of each operation also stay on the GPU, so no time is wasted copying data back and forth.
+
+::::::::::::::::::::::::::::::::::::: callout
+
+## Two important details
+
+**The GPU works in the background.** When you call a DPNP function, Python asks the GPU to start the work and then immediately carries on to the next line, without waiting for it to finish. This is great for performance, but it means a timer could stop before the GPU has actually done the work! `result.sycl_queue.wait()` pauses Python until the GPU has finished. You only need this when timing code. Anything that needs the actual values, such as `print(result)`, waits automatically.
+
+**The first call is slow.** The first time a DPNP function runs, the GPU code is prepared ("compiled") for your specific GPU. This is why the example calls `smooth()` once before timing it. In a real program this happens once, so it rarely matters.
+
+:::::::::::::::::::::::::::::::::::::::::::::
+
+::::::::::::::::::::::::::::::::::::: caution
+
+## GPUs and floating point accuracy
+
+By default, numpy stores floating point numbers (decimals) with what is called 64-bit precision. Meanwhile Many GPUs, particularly Intel integrated graphics cannot work with 64-bit floating point numbers (`float64`, NumPy's default). On these devices DPNP will silently use 32-bit numbers (`float32`) instead.
+
+**This sounds complicated**, however, we don't need to go into technical details here. The plain English version is in numpy, calculations are by default accurate up 16 decimal places. However some GPUs are only accurate up to 7. As such in these cases DPNP
+will silently continue and your calculations at a reduced accuracy. For many tasks this is fine, 7 decimal places is plenty accurate. However, if your results need high precision, you may wish to tread carefully. Fortunately, You can check what the particular GPU you are using on supports with:
+
+```python
+import dpctl
+print(dpctl.select_default_device().has_aspect_fp64)
+```
+
+Thus, if this is a problem for your use case it may be worth putting in a check at the start to warn about any potential loss of accuracy. Note: In this episode we explicitly create data as `float32` everywhere using the `astype(np.float32)` method. This keeps everything comparable by forcing numpy to use 32-bit precision on CPU as well as GPU.
+
+:::::::::::::::::::::::::::::::::::::::::::::
+
+::::::::::::::::::::::::::::::::::::: callout
+
+## Have an NVIDIA of AMD graphics card? Use CuPy
+
+If your computer has a dedicated NVIDIA graphics card (or AMD on Linux), [CuPy](https://cupy.dev/) is a better option than DPNP. It works in the same way (`import cupy as np`), it is more mature, and it has much wider support for NumPy and SciPy functions.
+
+The only other change to the example above is how to wait for the GPU:
+
+```python
+import cupy as np
+...
+    np.cuda.Device().synchronize()          # wait for the GPU to finish
+```
+
+On the same laptop, using a NVIDIA T600 graphics card we get:
+
+```output
+smooth: 0.013 s
+```
+
+That is roughly 65x faster than NumPy. Dedicated graphics cards have their own very fast memory and far more cores than integrated graphics, which share the computer's main memory with the CPU.
+
+Instructions to install CuPy can be found on the [setup page](../learners/setup.md)
+
+:::::::::::::::::::::::::::::::::::::::::::::
+
+## When does the GPU *not* help?
+
+A GPU is not magic, and on some hardware it can make code slower. The following example times the same calculation, `sqrt(x² + 1) × sin(x)`, done three ways: with a Python loop, with NumPy, and with DPNP, first for 1,000 numbers and then for 10 million.
+
+```python
+import math
+import numpy
+import dpnp
+from timeit import timeit
+
+for N in (1_000, 10_000_000):
+    numpy.random.seed(42)
+    x_list = numpy.random.random(N).astype(numpy.float32).tolist()
+    x_numpy = numpy.array(x_list, dtype=numpy.float32)
+    x_gpu = dpnp.asarray(x_numpy)
+
+    def python_loop():
+        return [math.sqrt(v * v + 1) * math.sin(v) for v in x_list]
+
+    def with_numpy():
+        return numpy.sqrt(x_numpy * x_numpy + 1) * numpy.sin(x_numpy)
+
+    def with_dpnp():
+        result = dpnp.sqrt(x_gpu * x_gpu + 1) * dpnp.sin(x_gpu)
+        result.sycl_queue.wait()
+        return result
+
+    with_dpnp()  # warm-up
+    print(f"N = {N:,}")
+    for f in (python_loop, with_numpy, with_dpnp):
+        print(f"  {f.__name__}: {timeit(f, number=5) / 5:.5f} s")
+```
+
+```output
+N = 1,000
+  python_loop: 0.00011 s
+  with_numpy: 0.00001 s
+  with_dpnp: 0.00066 s
+N = 10,000,000
+  python_loop: 1.01007 s
+  with_numpy: 0.03804 s
+  with_dpnp: 0.04210 s
+```
+
+Two things stand out:
+
+- **Small amounts of data are much slower on the GPU.** For 1,000 numbers, DPNP is approximately 66 times slower than NumPy, and even slower than the plain Python loop! Each operation has a fixed cost for starting work on the GPU, which in this case takes longer than the work itself.
+- **Simple calculations may not benefit at all.** Even for 10 million numbers, DPNP is no faster than NumPy on our example Laptop. Each operation here does very little maths per number, so the time is mostly spent reading and writing memory. An integrated GPU shares the same memory as the CPU, so it has no advantage. (CuPy on the NVIDIA card took 0.003 s for the same calculation, about 12x faster than NumPy, thanks to its own much faster dedicated memory.)
+
+Notice that switching from a Python loop to NumPy was a *25x* speed-up, which is a reminder that vectorising your code with NumPy is the first, and often the biggest, step.
+
+### Copying data to and from the GPU
+
+Data must be copied between normal (CPU) memory and the GPU. This is generally handled automatically when you use a DPNP method. However, these copies take time, so if you are doing multiple operations on GPU. Or doing some work on GPU and some more on CPU. It is generally best to move your data to the GPU once, do as much work there as possible, then copy the results back.
+
+The `dpnp.asarray()` method copies a NumPy array to the GPU and `dpnp.asnumpy()` copies a DPNP array back to NumPy.
+
+```python
+import numpy
+import dpnp
+from timeit import timeit
+
+N = 4096
+numpy.random.seed(42)
+image = numpy.random.random((N, N)).astype(numpy.float32)   # lives in CPU memory
+image_gpu = dpnp.asarray(image)                             # copied to the GPU once
+
+def fft_numpy():
+    return numpy.fft.fft2(image)
+
+def fft_gpu_data_already_there():
+    result = dpnp.fft.fft2(image_gpu)
+    result.sycl_queue.wait()
+    return result
+
+def fft_gpu_copy_every_time():
+    result = dpnp.fft.fft2(dpnp.asarray(image))   # copy to GPU
+    return dpnp.asnumpy(result)                    # copy back to CPU
+
+fft_gpu_data_already_there(); fft_gpu_copy_every_time()  # warm-up
+repeats = 10
+for f in (fft_numpy, fft_gpu_data_already_there, fft_gpu_copy_every_time):
+    print(f"{f.__name__}: {timeit(f, number=repeats) / repeats:.3f} s")
+```
+
+```output
+fft_numpy: 0.646 s
+fft_gpu_data_already_there: 0.111 s
+fft_gpu_copy_every_time: 0.152 s
+```
+
+In this case copying to and from the GPU every time adds over a third to the runtime, but it is still much faster than NumPy because an FFT does a lot of work per number. For simpler calculations, the copying alone can take longer than doing the whole job on the CPU.
+
+::::::::::::::::::::::::::::::::::::: callout
+
+## Rules of thumb
+
+A GPU is most likely to help when:
+
+- there is a lot of data (millions of numbers, not thousands),
+- each number needs a lot of maths (e.g. FFTs, large matrix operations, image processing),
+- the data can stay on the GPU between steps.
+
+And whatever you change, always time it on your own hardware!
+
+:::::::::::::::::::::::::::::::::::::::::::::
+
+## What about SciPy?
+
+DPNP's main focus is NumPy. Its support for SciPy is limited to a handful of functions inside `dpnp.scipy`, such as `dpnp.scipy.linalg.lu_factor()` and `lu_solve()` for solving systems of linear equations. Where a function exists, the pattern is the same: swap the import.
+
+```python
+import numpy
+import scipy.linalg
+import dpnp
+import dpnp.scipy.linalg
+
+N = 4096
+numpy.random.seed(0)
+A = numpy.random.random((N, N)).astype(numpy.float32) + N * numpy.eye(N, dtype=numpy.float32)
+b = numpy.random.random(N).astype(numpy.float32)
+
+# SciPy, on the CPU
+x = scipy.linalg.lu_solve(scipy.linalg.lu_factor(A), b)
+
+# DPNP, on the GPU
+A_gpu, b_gpu = dpnp.asarray(A), dpnp.asarray(b)
+x_gpu = dpnp.scipy.linalg.lu_solve(dpnp.scipy.linalg.lu_factor(A_gpu), b_gpu)
+```
+
+On our example laptop the DPNP version took 0.14 s, compared to 0.32 s for SciPy: a little over twice as fast, even though SciPy's linear algebra already uses every CPU core.
+
+If you rely heavily on SciPy and have an dedicated graphics card, CuPy is a much better route. Its [`cupyx.scipy`](https://docs.cupy.dev/en/stable/reference/scipy.html) module covers large parts of SciPy, including `fft`, `signal`, `ndimage`, `sparse`, `linalg`, `special`, `stats` and `interpolate`, again with the same function names.
+
+::::::::::::::::::::::::::::::::::::: challenge
+
+## Is it worth it?
+
+The function below calculates the average power spectrum of 2,000 recorded signals.
+
+```python
+import numpy as np
+from timeit import timeit
+
+np.random.seed(1)
+signals = np.random.random((2_000, 16_384)).astype(np.float32)  # 2000 recordings
+
+def average_spectrum(signals):
+    spectra = np.abs(np.fft.rfft(signals, axis=1)) ** 2
+    result = spectra.mean(axis=0)
+    return result
+
+print(f"average_spectrum: {timeit(lambda: average_spectrum(signals), number=10) / 10:.3f} s")
+```
+
+Convert it to use DPNP and time both versions. Is the GPU version faster on your computer?
+
+:::::::::::::::::::::::: hint
+
+Remember the two details: wait for the GPU to finish before the timer stops, and do a "warm-up" run before timing.
+
+:::::::::::::::::::::::::::::::::
+
+:::::::::::::::::::::::: solution
+
+```python
+import dpnp as np
+from timeit import timeit
+
+np.random.seed(1)
+signals = np.random.random((2_000, 16_384)).astype(np.float32)  # 2000 recordings
+
+def average_spectrum(signals):
+    spectra = np.abs(np.fft.rfft(signals, axis=1)) ** 2
+    result = spectra.mean(axis=0)
+    result.sycl_queue.wait()
+    return result
+
+average_spectrum(signals)
+print(f"average_spectrum: {timeit(lambda: average_spectrum(signals), number=10) / 10:.3f} s")
+```
+
+On the laptop used for this episode:
+
+```output
+NumPy: average_spectrum: 0.456 s
+DPNP:  average_spectrum: 0.312 s
+CuPy:  average_spectrum: 0.006 s
+```
+
+The integrated GPU was about 1.5x faster than NumPy here, while the NVIDIA card was over 70x faster. Your results may be completely different, and the integrated GPU may even be slower! The lesson is that changing the import is easy, but you should always measure before and after to check it actually helped.
+
+:::::::::::::::::::::::::::::::::
+:::::::::::::::::::::::::::::::::::::::::::::::
+
+## Faster Pandas with Modin
+
+[Modin](https://modin.readthedocs.io/) does for Pandas what DPNP does for NumPy: you change the import, and the rest of your code stays the same.
+
+```python
+import modin.pandas as pd
+```
+
+However, Modin does **not** use the GPU. Pandas normally does all its work on a single CPU core. Modin splits your DataFrame into pieces and works on them using *all* of your CPU cores at the same time. Most laptops have 4-16 cores, so for the right kind of work this can give a good speed-up, and it works on any laptop.
+
+Behind the scenes, Modin hands the work to an "engine" which manages the CPU cores. We will use [Ray](https://www.ray.io/), which is the default and usually the fastest.
+
+::::::::::::::::::::::::::::::::::::: callout
+
+If you are using an Intel Mac or WSL on Windows, Ray may not work. Use the Dask engine instead: install `modin[dask]`, and use `modin.config.Engine.put("dask")` in the examples below.
+
+:::::::::::::::::::::::::::::::::::::::::::::
+
+To try Modin, we'll first create a large CSV file of (made up) weather readings from 1,000 stations, with 10 million rows (about 140 MB):
+
+```python
+import numpy as np
+import pandas as pd
+
+N = 10_000_000
+rng = np.random.default_rng(1)
+pd.DataFrame({
+    "station": rng.integers(0, 1000, N),
+    "temperature": rng.normal(10, 5, N).round(2),
+    "rainfall": rng.exponential(2, N).round(2),
+}).to_csv("weather.csv", index=False)
+```
+
+The following Pandas code reads the file, then performs a row-by-row `apply()`, a `map()` and a `groupby()`.
+
+```python
+import time
+import pandas as pd
+
+def timed(label, func):
+    start = time.perf_counter()
+    result = func()
+    print(f"{label}: {time.perf_counter() - start:.2f} s")
+    return result
+
+def feels_like(row):
+    if row["rainfall"] > 5:
+        return row["temperature"] - 3
+    return row["temperature"]
+
+df = timed("read_csv", lambda: pd.read_csv("weather.csv"))
+timed("apply", lambda: df.apply(feels_like, axis=1))
+timed("map", lambda: df["temperature"].map(lambda t: t * 9 / 5 + 32))
+timed("groupby", lambda: df.groupby("station").mean())
+```
+
+```output
+read_csv: 1.44 s
+apply: 45.98 s
+map: 2.75 s
+groupby: 0.19 s
+```
+
+Now the Modin version. The import changes, plus a few lines to make the timings fair:
+
+```python
+import time
+import modin.pandas as pd
+import modin.config
+from modin.utils import execute
+
+modin.config.Engine.put("ray")
+pd.DataFrame({"warm_up": [1]}).sum()   # start Ray before we time anything
+
+def timed(label, func):
+    start = time.perf_counter()
+    result = func()
+    execute(result)                    # wait for Modin to finish
+    print(f"{label}: {time.perf_counter() - start:.2f} s")
+    return result
+
+def feels_like(row):
+    if row["rainfall"] > 5:
+        return row["temperature"] - 3
+    return row["temperature"]
+
+df = timed("read_csv", lambda: pd.read_csv("weather.csv"))
+timed("apply", lambda: df.apply(feels_like, axis=1))
+timed("map", lambda: df["temperature"].map(lambda t: t * 9 / 5 + 32))
+timed("groupby", lambda: df.groupby("station").mean())
+```
+
+```output
+read_csv: 1.26 s
+apply: 19.19 s
+map: 0.70 s
+groupby: 0.24 s
+```
+
+`apply()` is now 2.4x faster and `map()` almost 4x faster. These run a Python function once for every row, which is exactly the kind of slow work that benefits from being split across many cores. `read_csv()` is a little faster, and `groupby()` is actually slightly slower, because Pandas already does this efficiently and Modin adds the cost of splitting the work up.
+
+::::::::::::::::::::::::::::::::::::: callout
+
+## Modin also works in the background
+
+Just like the GPU, Modin starts work and then lets Python carry on before it has finished. When *timing* Modin code, use `modin.utils.execute()` to wait for the work to complete, otherwise operations can appear to take almost no time at all. Starting Ray also takes a few seconds the first time Modin is used, which is why the example runs a small "warm-up" calculation first.
+
+You don't need either of these in normal code; Modin waits automatically whenever you look at the results.
+
+:::::::::::::::::::::::::::::::::::::::::::::
+
+### When Modin doesn't help
+
+Splitting work between cores has a cost. For small DataFrames that cost is far larger than the work itself:
+
+```python
+from timeit import timeit
+import pandas
+import modin.pandas as mpd
+import modin.config
+from modin.utils import execute
+
+modin.config.Engine.put("ray")
+small_pandas = pandas.DataFrame({"a": range(1000), "b": range(1000)})
+small_modin = mpd.DataFrame({"a": range(1000), "b": range(1000)})
+execute(small_modin.sum())  # warm-up
+
+print(f"pandas: {timeit(lambda: small_pandas.sum(), number=100) / 100:.5f} s")
+print(f"modin:  {timeit(lambda: execute(small_modin.sum()), number=100) / 100:.5f} s")
+```
+
+```output
+pandas: 0.00005 s
+modin:  0.04548 s
+```
+
+Almost 1000x slower! Modin is designed for DataFrames with millions of rows. For small data, plain Pandas is best.
+
+Also remember the advice from the earlier episode on [scientific Python packages](optimisation-numpy.md): replacing `apply()` with vectorised column operations, e.g. `df["temperature"] * 9 / 5 + 32`, is often far faster than anything Modin can do, and works without any extra libraries.
+
+::::::::::::::::::::::::::::::::::::: callout
+
+## Pandas on the GPU: `cudf.pandas`
+
+If you have an NVIDIA graphics card and use Linux (or WSL on Windows), NVIDIA's [`cudf.pandas`](https://docs.rapids.ai/api/cudf/stable/cudf_pandas/) can run Pandas code on the GPU without changing your code at all. Run your script with:
+
+```sh
+python -m cudf.pandas my_script.py
+```
+
+Operations that are supported on the GPU run there automatically, and anything else falls back to normal Pandas.
+
+:::::::::::::::::::::::::::::::::::::::::::::
+
+::::::::::::::::::::::::::::::::::::: challenge
+
+## Speed up a Pandas script
+
+The following script labels each reading by temperature, marks "wet and cold" readings, then counts them. It uses the `weather.csv` file we created earlier.
+
+```python
+import time
+import pandas as pd
+
+start = time.perf_counter()
+df = pd.read_csv("weather.csv")
+df["season_label"] = df["temperature"].map(lambda t: "cold" if t < 5 else "mild" if t < 15 else "warm")
+df["wet"] = df.apply(lambda row: row["rainfall"] > 2 and row["temperature"] < 10, axis=1)
+counts = df.groupby("season_label")["wet"].sum()
+print(counts)
+print(f"total: {time.perf_counter() - start:.2f} s")
+```
+
+Convert it to use Modin and compare the total runtime. Which lines do you expect to benefit the most?
+
+:::::::::::::::::::::::: hint
+
+Only the import needs to change. Because the script prints `counts` at the end, Modin has to finish all its work before the timer stops, so `execute()` isn't needed here.
+
+:::::::::::::::::::::::::::::::::
+
+:::::::::::::::::::::::: solution
+
+```python
+import time
+import modin.pandas as pd
+import modin.config
+
+modin.config.Engine.put("ray")
+
+start = time.perf_counter()
+df = pd.read_csv("weather.csv")
+df["season_label"] = df["temperature"].map(lambda t: "cold" if t < 5 else "mild" if t < 15 else "warm")
+df["wet"] = df.apply(lambda row: row["rainfall"] > 2 and row["temperature"] < 10, axis=1)
+counts = df.groupby("season_label")["wet"].sum()
+print(counts)
+print(f"total: {time.perf_counter() - start:.2f} s")
+```
+
+```output
+pandas total: 41.71 s
+modin total: 22.29 s
+```
+
+For our machine this was almost twice as fast. Which is not bad for changing one line (Note: this time includes Ray starting up). The `map()` and `apply()` lines, which run a Python function for every row, benefit the most.
+
+:::::::::::::::::::::::::::::::::
+:::::::::::::::::::::::::::::::::::::::::::::::
+
+::::::::::::::::::::::::::::::::::::: keypoints
+
+- GPUs have thousands of simple cores and are good at doing the same calculation on large amounts of data, but copying data to the GPU and starting work there both have a cost.
+- DPNP can run NumPy code on Intel GPUs (including laptop integrated graphics) by changing `import numpy as np` to `import dpnp as np`. However, Its SciPy support is limited to a few functions.
+- If you have an NVIDIA graphics card, CuPy is a better choice: it is more mature and covers much more of NumPy and SciPy (via `cupyx.scipy`).
+- Modin runs Pandas code across all CPU cores (not the GPU) by changing `import pandas as pd` to `import modin.pandas as pd`. It helps most with row-by-row operations on large DataFrames.
+- GPUs and Modin both work in the background, so wait for them to finish when timing code.
+- Neither helps with small data, and results are very hardware dependent: always measure on your own computer.
+
+::::::::::::::::::::::::::::::::::::::::::::::::
