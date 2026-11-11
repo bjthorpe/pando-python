@@ -16,7 +16,7 @@ exercises: 20
 ::::::::::::::::::::::::::::::::::::: objectives
 
 - Understand what a GPU is and when using one will (and won't) help with performance.
-- Able to swap NumPy (and some SciPy) for DPNP, and know when CuPy is the better choice.
+- Able to swap NumPy (and some SciPy) for DPNP or CuPy, and choose between them.
 - Able to swap Pandas for Modin and explain how it differs from GPU acceleration.
 - Able to time GPU and Modin code correctly, by waiting for the work to finish.
 
@@ -24,14 +24,15 @@ exercises: 20
 
 ::::::::::::::::::::::::::::::::::::: instructor
 
-- This episode introduces two "drop-in replacement" libraries, where changing an `import` line is enough to move work onto different hardware:
+- This episode introduces three "drop-in replacement" libraries, where changing an `import` line is enough to move work onto different hardware:
 
   - [DPNP](https://intelpython.github.io/dpnp/) runs NumPy code on Intel GPUs, including the integrated graphics found in most Intel laptops.
+  - [CuPy](https://cupy.dev/) The same but for Nvidia and some AMD gpus.
   - [Modin](https://modin.readthedocs.io/) runs Pandas code across all CPU cores (it does **not** use the GPU).
 
-- **We choose to use DPNP as it's support for integrated graphics.** This was a deliberate choice as provides the widest range of hardware support and allows most users to use there own laptops to run the examples (sorry MacOs people). However, the examples and principles used in this material are fully transferable to and were tested with CuPY, you only need to change a few lines. So if you want to teach it with dedicated graphics hardware you can.
+- **The GPU examples are all "bi-lingual" between DPNP and CuPy.** This was a deliberate choice as provides the widest range of hardware support and allows most users to use there own laptops to run the examples (sorry MacOs people). The examples and principles used in this material are near identical and fully transferable between CuPY and DPNP, you only need to change a few lines. So if you want to teach it with dedicated graphics hardware you can. Every GPU example is given in two tabs, "DPNP (Intel)" and "CuPy (NVIDIA or AMD)", each with its own measured output. The tabs are linked, so choosing CuPy once switches every example on the page.
 
-- In a similar vain we choose to use Modlin as, although its CPU only, it works everywhere, (CudaDF is good but currently only supports Nvidia) and it shares many of the same principles. That is change 1 import, has a measurable startup cost and only works well on certain workloads ect.
+- In a similar vain we choose to use Modlin as, although its CPU only, it works everywhere, (CudaDF is good but currently only supports Nvidia on Linux) and it shares many of the same principles. That is change 1 import, has a measurable startup cost and only works well on certain workloads ect.
 
 - GPU programming is a massive topic in its own right and this episode only scratches the surface. Writing your own GPU kernels (e.g. with Numba or custom CuPy kernels) is possible but has been deliberately left out.
 
@@ -66,10 +67,28 @@ The example outputs shown were recorded on a laptop with:
 
 A more powerful integrated GPU, or a dedicated graphics card, may show very different results.
 
-## Change one import: NumPy on the GPU with DPNP
+## Change one import: NumPy on the GPU (DPNP or CuPy)
 
-[DPNP](https://intelpython.github.io/dpnp/) (the Data Parallel Extension for NumPy) is a library from Intel that copies the NumPy interface, but runs the work on a GPU. Because the functions have the same names, existing NumPy code can often be moved to the GPU by changing a single import.
- 
+There are two libraries which copy the NumPy interface, but run the work on a GPU:
+
+- [DPNP](https://intelpython.github.io/dpnp/) (the Data Parallel Extension for NumPy) is from Intel and runs on Intel GPUs, including the integrated graphics in most Intel laptops.
+- [CuPy](https://cupy.dev/) runs on NVIDIA graphics cards (and, on Linux, some AMD cards).
+
+Because the functions have the same names as NumPy's, existing NumPy code can often be moved to the GPU by changing a single import.
+
+Each GPU example in this episode has two tabs: one for DPNP and one for CuPy. Pick the one that matches your hardware; the tabs are linked, so your choice applies to every example on the page.
+
+::::::::::::::::::::::::::::::::::::: callout
+
+## Which should I use: DPNP or CuPy?
+
+If your computer has a dedicated NVIDIA graphics card (or a supported AMD card on Linux), [CuPy](https://cupy.dev/) is the better option. It is more mature than DPNP, and it has much wider support for NumPy and SciPy functions.
+
+DPNP's strength is that it runs on the integrated graphics found in most Intel laptops, so you can use it without a dedicated graphics card.
+
+Instructions to install both can be found on the [setup page](../learners/setup.md).
+
+::::::::::::::::::::::::::::::::::::::::::::: 
 ::::::::::::::::::::::::::::::::::::: callout
 
 ## Will DPNP work on my laptop?
@@ -89,7 +108,7 @@ python -m dpctl --full-list
 If a device is listed you are ready to go.
 
 Note: If you have a Mac or otherwise dont have Intel graphics, we have provided sample outputs so you can follow along.
-Also if you have an NVIDIA graphics card (or, on Linux, a supported AMD card), you can use CuPy instead (see below). Note: The Modin section later in the episode works on any laptop.
+Also if you have an NVIDIA graphics card (or, on Linux, a supported AMD card), you can use CuPy instead: choose the "CuPy" tab in the examples below. Note: The Modin section later in the episode works on any laptop.
 
 :::::::::::::::::::::::::::::::::::::::::::::
 
@@ -117,7 +136,11 @@ print(f"smooth: {timeit(lambda: smooth(image), number=repeats) / repeats:.3f} s"
 smooth: 0.855 s
 ```
 
-To run this on the GPU, we change `import numpy as np` to `import dpnp as np`. Everything else stays the same, apart from one extra line which we will explain shortly.
+To run this on the GPU, we change `import numpy as np` to `import dpnp as np` (or `import cupy as np`). Everything else stays the same, apart from one extra line which we will explain shortly.
+
+::::::::::::::::::::::::::::::::::::: group-tab
+
+### DPNP (Intel)
 
 ```python
 import dpnp as np
@@ -144,17 +167,48 @@ print(f"smooth: {timeit(lambda: smooth(image), number=repeats) / repeats:.3f} s"
 smooth: 0.228 s
 ```
 
-Almost 4x faster, from changing one line!
+Almost 4x faster, from changing one line, on a modest integrated laptop GPU!
 
-Because `np.random.random()` is now DPNP's version, `image` is created directly in the GPU's memory, and every operation on it runs on the GPU. The results of each operation also stay on the GPU, so no time is wasted copying data back and forth.
+### CuPy (NVIDIA or AMD)
+
+```python
+import cupy as np
+from timeit import timeit
+
+N = 4096
+np.random.seed(42)
+image = np.random.random((N, N)).astype(np.float32)
+
+def smooth(image):
+    freq = np.fft.fft2(image)               # convert to frequencies
+    freq[N // 8 : -N // 8, :] = 0           # remove high frequencies
+    freq[:, N // 8 : -N // 8] = 0
+    result = np.fft.ifft2(freq).real        # convert back to an image
+    np.cuda.Device().synchronize()          # wait for the GPU to finish
+    return result
+
+smooth(image)  # warm-up run
+repeats = 10
+print(f"smooth: {timeit(lambda: smooth(image), number=repeats) / repeats:.3f} s")
+```
+
+```output
+smooth: 0.013 s
+```
+
+Roughly 65x faster, from changing one line! Even an entry-level dedicated graphics card like this NVIDIA T600 has its own very fast memory and far more cores than integrated graphics, which share the computer's main memory with the CPU.
+
+::::::::::::::::::::::::::::::::::::::::::::::::
+
+Because `np.random.random()` is now the GPU library's version, `image` is created directly in the GPU's memory, and every operation on it runs on the GPU. The results of each operation also stay on the GPU, so no time is wasted copying data back and forth.
 
 ::::::::::::::::::::::::::::::::::::: callout
 
 ## Two important details
 
-**The GPU works in the background.** When you call a DPNP function, Python asks the GPU to start the work and then immediately carries on to the next line, without waiting for it to finish. This is great for performance, but it means a timer could stop before the GPU has actually done the work! `result.sycl_queue.wait()` pauses Python until the GPU has finished. You only need this when timing code. Anything that needs the actual values, such as `print(result)`, waits automatically.
+**The GPU works in the background.** When you call a DPNP or CuPy function, Python asks the GPU to start the work and then immediately carries on to the next line, without waiting for it to finish. This is great for performance, but it means a timer could stop before the GPU has actually done the work! To pause Python until the GPU has finished, use `result.sycl_queue.wait()` with DPNP, or `cupy.cuda.Device().synchronize()` with CuPy. You only need this when timing code. Anything that needs the actual values, such as `print(result)`, waits automatically.
 
-**The first call is slow.** The first time a DPNP function runs, the GPU code is prepared ("compiled") for your specific GPU. This is why the example calls `smooth()` once before timing it. In a real program this happens once, so it rarely matters.
+**The first call is slow.** The first time a GPU function runs, the GPU code is prepared ("compiled") for your specific GPU. This is why the example calls `smooth()` once before timing it. In a real program this happens once, so it rarely matters.
 
 :::::::::::::::::::::::::::::::::::::::::::::
 
@@ -164,47 +218,30 @@ Because `np.random.random()` is now DPNP's version, `image` is created directly 
 
 By default, numpy stores floating point numbers (decimals) with what is called 64-bit precision. Meanwhile Many GPUs, particularly Intel integrated graphics cannot work with 64-bit floating point numbers (`float64`, NumPy's default). On these devices DPNP will silently use 32-bit numbers (`float32`) instead.
 
-**This sounds complicated**, however, we don't need to go into technical details here. The plain English version is in numpy, calculations are by default accurate up 16 decimal places. However some GPUs are only accurate up to 7. As such in these cases DPNP
-will silently continue and your calculations at a reduced accuracy. For many tasks this is fine, 7 decimal places is plenty accurate. However, if your results need high precision, you may wish to tread carefully. Fortunately, You can check what the particular GPU you are using on supports with:
+**This sounds complicated**, fortunately, we don't need to go into technical details here. The plain English version is in numpy, calculations are by default accurate up 16 decimal places. However some GPUs are only accurate up to 7.
+
+As such in these cases DPNP will silently continue and your calculations at a reduced accuracy. For many tasks this is fine, 7 decimal places is plenty accurate. However, if your results need high precision, you may wish to tread carefully. Fortunately, with DPNP you can check what the particular GPU you are using supports with:
 
 ```python
 import dpctl
 print(dpctl.select_default_device().has_aspect_fp64)
 ```
 
-Thus, if this is a problem for your use case it may be worth putting in a check at the start to warn about any potential loss of accuracy. Note: In this episode we explicitly create data as `float32` everywhere using the `astype(np.float32)` method. This keeps everything comparable by forcing numpy to use 32-bit precision on CPU as well as GPU.
+Thus, if this is a problem for your use case it may be worth putting in a check at the start to warn about any potential loss of accuracy.
 
-:::::::::::::::::::::::::::::::::::::::::::::
+Note: This mainly affects DPNP on Intel integrated graphics. NVIDIA and AMD graphics cards used with CuPy do support `float64` at full accuracy, although on most consumer cards it is many times slower than `float32`. Therefore you may wish to consider if you really need the accuracy or if you can accept the trade-off for more performance.
 
-::::::::::::::::::::::::::::::::::::: callout
-
-## Have an NVIDIA of AMD graphics card? Use CuPy
-
-If your computer has a dedicated NVIDIA graphics card (or AMD on Linux), [CuPy](https://cupy.dev/) is a better option than DPNP. It works in the same way (`import cupy as np`), it is more mature, and it has much wider support for NumPy and SciPy functions.
-
-The only other change to the example above is how to wait for the GPU:
-
-```python
-import cupy as np
-...
-    np.cuda.Device().synchronize()          # wait for the GPU to finish
-```
-
-On the same laptop, using a NVIDIA T600 graphics card we get:
-
-```output
-smooth: 0.013 s
-```
-
-That is roughly 65x faster than NumPy. Dedicated graphics cards have their own very fast memory and far more cores than integrated graphics, which share the computer's main memory with the CPU.
-
-Instructions to install CuPy can be found on the [setup page](../learners/setup.md)
+Note: In this episode we explicitly create data as `float32` everywhere using the `astype(np.float32)` method. This keeps everything comparable by forcing numpy to use 32-bit precision on CPU as well as GPU.
 
 :::::::::::::::::::::::::::::::::::::::::::::
 
 ## When does the GPU *not* help?
 
-A GPU is not magic, and on some hardware it can make code slower. The following example times the same calculation, `sqrt(x² + 1) × sin(x)`, done three ways: with a Python loop, with NumPy, and with DPNP, first for 1,000 numbers and then for 10 million.
+A GPU is not magic, and on some hardware it can make code slower. The following example times the same calculation, `sqrt(x² + 1) × sin(x)`, done three ways: with a Python loop, with NumPy, and on the GPU, first for 1,000 numbers and then for 10 million.
+
+::::::::::::::::::::::::::::::::::::: group-tab
+
+### DPNP (Intel)
 
 ```python
 import math
@@ -246,18 +283,70 @@ N = 10,000,000
   with_dpnp: 0.04210 s
 ```
 
+For 1,000 numbers, DPNP is approximately 66 times slower than NumPy, and even slower than the plain Python loop! For 10 million numbers, DPNP is no faster than NumPy on our example laptop.
+
+### CuPy (NVIDIA or AMD)
+
+```python
+import math
+import numpy
+import cupy
+from timeit import timeit
+
+for N in (1_000, 10_000_000):
+    numpy.random.seed(42)
+    x_list = numpy.random.random(N).astype(numpy.float32).tolist()
+    x_numpy = numpy.array(x_list, dtype=numpy.float32)
+    x_gpu = cupy.asarray(x_numpy)
+
+    def python_loop():
+        return [math.sqrt(v * v + 1) * math.sin(v) for v in x_list]
+
+    def with_numpy():
+        return numpy.sqrt(x_numpy * x_numpy + 1) * numpy.sin(x_numpy)
+
+    def with_cupy():
+        result = cupy.sqrt(x_gpu * x_gpu + 1) * cupy.sin(x_gpu)
+        cupy.cuda.Device().synchronize()
+        return result
+
+    with_cupy()  # warm-up
+    print(f"N = {N:,}")
+    for f in (python_loop, with_numpy, with_cupy):
+        print(f"  {f.__name__}: {timeit(f, number=5) / 5:.5f} s")
+```
+
+```output
+N = 1,000
+  python_loop: 0.00009 s
+  with_numpy: 0.00001 s
+  with_cupy: 0.00005 s
+N = 10,000,000
+  python_loop: 1.06577 s
+  with_numpy: 0.04910 s
+  with_cupy: 0.00329 s
+```
+
+For 1,000 numbers, CuPy is several times slower than NumPy. For 10 million numbers, it is about 15x faster than NumPy, because a dedicated graphics card has its own, much faster, memory.
+
+::::::::::::::::::::::::::::::::::::::::::::::::
+
 Two things stand out:
 
-- **Small amounts of data are much slower on the GPU.** For 1,000 numbers, DPNP is approximately 66 times slower than NumPy, and even slower than the plain Python loop! Each operation has a fixed cost for starting work on the GPU, which in this case takes longer than the work itself.
-- **Simple calculations may not benefit at all.** Even for 10 million numbers, DPNP is no faster than NumPy on our example Laptop. Each operation here does very little maths per number, so the time is mostly spent reading and writing memory. An integrated GPU shares the same memory as the CPU, so it has no advantage. (CuPy on the NVIDIA card took 0.003 s for the same calculation, about 12x faster than NumPy, thanks to its own much faster dedicated memory.)
+- **Small amounts of data are slower on the GPU.** Each operation has a fixed cost for starting work on the GPU, which for small amounts of data can easily take longer than the work itself.
+- **Simple calculations may not benefit on integrated graphics.** Each operation here does very little maths per number, so the time is mostly spent reading and writing memory. An integrated GPU shares the same memory as the CPU, so it has little or no advantage. A dedicated graphics card, with its own fast memory, still does well.
 
-Notice that switching from a Python loop to NumPy was a *25x* speed-up, which is a reminder that vectorising your code with NumPy is the first, and often the biggest, step.
+Notice that switching from a Python loop to NumPy was a *20x* or more speed-up, which is a reminder that vectorising your code with NumPy is the first, and often the biggest, step.
 
 ### Copying data to and from the GPU
 
-Data must be copied between normal (CPU) memory and the GPU. This is generally handled automatically when you use a DPNP method. However, these copies take time, so if you are doing multiple operations on GPU. Or doing some work on GPU and some more on CPU. It is generally best to move your data to the GPU once, do as much work there as possible, then copy the results back.
+Data must be copied between normal (CPU) memory and the GPU. This is generally handled automatically when you use a DPNP or CuPy function. However, these copies take time, so if you are doing multiple operations on GPU. Or doing some work on GPU and some more on CPU. It is generally best to move your data to the GPU once, do as much work there as possible, then copy the results back.
 
-The `dpnp.asarray()` method copies a NumPy array to the GPU and `dpnp.asnumpy()` copies a DPNP array back to NumPy.
+The `asarray()` function (`dpnp.asarray()` or `cupy.asarray()`) copies a NumPy array to the GPU and `asnumpy()` (`dpnp.asnumpy()` or `cupy.asnumpy()`) copies a GPU array back to NumPy.
+
+::::::::::::::::::::::::::::::::::::: group-tab
+
+### DPNP (Intel)
 
 ```python
 import numpy
@@ -293,7 +382,49 @@ fft_gpu_data_already_there: 0.111 s
 fft_gpu_copy_every_time: 0.152 s
 ```
 
-In this case copying to and from the GPU every time adds over a third to the runtime, but it is still much faster than NumPy because an FFT does a lot of work per number. For simpler calculations, the copying alone can take longer than doing the whole job on the CPU.
+In this case copying to and from the GPU every time adds over a third to the runtime, but it is still much faster than NumPy because an FFT does a lot of work per number.
+
+### CuPy (NVIDIA or AMD)
+
+```python
+import numpy
+import cupy
+from timeit import timeit
+
+N = 4096
+numpy.random.seed(42)
+image = numpy.random.random((N, N)).astype(numpy.float32)   # lives in CPU memory
+image_gpu = cupy.asarray(image)                             # copied to the GPU once
+
+def fft_numpy():
+    return numpy.fft.fft2(image)
+
+def fft_gpu_data_already_there():
+    result = cupy.fft.fft2(image_gpu)
+    cupy.cuda.Device().synchronize()
+    return result
+
+def fft_gpu_copy_every_time():
+    result = cupy.fft.fft2(cupy.asarray(image))   # copy to GPU
+    return cupy.asnumpy(result)                    # copy back to CPU
+
+fft_gpu_data_already_there(); fft_gpu_copy_every_time()  # warm-up
+repeats = 10
+for f in (fft_numpy, fft_gpu_data_already_there, fft_gpu_copy_every_time):
+    print(f"{f.__name__}: {timeit(f, number=repeats) / repeats:.3f} s")
+```
+
+```output
+fft_numpy: 0.738 s
+fft_gpu_data_already_there: 0.006 s
+fft_gpu_copy_every_time: 0.057 s
+```
+
+Copying to and from the graphics card every time makes this almost 10x slower! The FFT itself is so fast that the copying, which has to travel over the connection between the CPU and the graphics card, now takes most of the time. It is still much faster than NumPy, but the data should be kept on the GPU wherever possible.
+
+::::::::::::::::::::::::::::::::::::::::::::::::
+
+For simpler calculations, the copying alone can take longer than doing the whole job on the CPU.
 
 ::::::::::::::::::::::::::::::::::::: callout
 
@@ -311,7 +442,11 @@ And whatever you change, always time it on your own hardware!
 
 ## What about SciPy?
 
-DPNP's main focus is NumPy. Its support for SciPy is limited to a handful of functions inside `dpnp.scipy`, such as `dpnp.scipy.linalg.lu_factor()` and `lu_solve()` for solving systems of linear equations. Where a function exists, the pattern is the same: swap the import.
+DPNP's main focus is NumPy. Its support for SciPy is limited to a handful of functions inside `dpnp.scipy`, such as `dpnp.scipy.linalg.lu_factor()` and `lu_solve()` for solving systems of linear equations. CuPy has much wider SciPy support, inside `cupyx.scipy`. Where a function exists, the pattern is the same: swap the import.
+
+::::::::::::::::::::::::::::::::::::: group-tab
+
+### DPNP (Intel)
 
 ```python
 import numpy
@@ -334,7 +469,32 @@ x_gpu = dpnp.scipy.linalg.lu_solve(dpnp.scipy.linalg.lu_factor(A_gpu), b_gpu)
 
 On our example laptop the DPNP version took 0.14 s, compared to 0.32 s for SciPy: a little over twice as fast, even though SciPy's linear algebra already uses every CPU core.
 
-If you rely heavily on SciPy and have an dedicated graphics card, CuPy is a much better route. Its [`cupyx.scipy`](https://docs.cupy.dev/en/stable/reference/scipy.html) module covers large parts of SciPy, including `fft`, `signal`, `ndimage`, `sparse`, `linalg`, `special`, `stats` and `interpolate`, again with the same function names.
+### CuPy (NVIDIA or AMD)
+
+```python
+import numpy
+import scipy.linalg
+import cupy
+import cupyx.scipy.linalg
+
+N = 4096
+numpy.random.seed(0)
+A = numpy.random.random((N, N)).astype(numpy.float32) + N * numpy.eye(N, dtype=numpy.float32)
+b = numpy.random.random(N).astype(numpy.float32)
+
+# SciPy, on the CPU
+x = scipy.linalg.lu_solve(scipy.linalg.lu_factor(A), b)
+
+# CuPy, on the GPU
+A_gpu, b_gpu = cupy.asarray(A), cupy.asarray(b)
+x_gpu = cupyx.scipy.linalg.lu_solve(cupyx.scipy.linalg.lu_factor(A_gpu), b_gpu)
+```
+
+On our example laptop the CuPy version took 0.07 s, compared to 0.37 s for SciPy: about 5x faster, even though SciPy's linear algebra already uses every CPU core.
+
+::::::::::::::::::::::::::::::::::::::::::::::::
+
+If you rely heavily on SciPy and have a dedicated graphics card, CuPy is a much better route. Its [`cupyx.scipy`](https://docs.cupy.dev/en/stable/reference/scipy.html) module covers large parts of SciPy, including `fft`, `signal`, `ndimage`, `sparse`, `linalg`, `special`, `stats` and `interpolate`, again with the same function names.
 
 ::::::::::::::::::::::::::::::::::::: challenge
 
@@ -357,7 +517,7 @@ def average_spectrum(signals):
 print(f"average_spectrum: {timeit(lambda: average_spectrum(signals), number=10) / 10:.3f} s")
 ```
 
-Convert it to use DPNP and time both versions. Is the GPU version faster on your computer?
+Convert it to use DPNP (or CuPy) and time both versions. Is the GPU version faster on your computer?
 
 :::::::::::::::::::::::: hint
 
@@ -366,6 +526,10 @@ Remember the two details: wait for the GPU to finish before the timer stops, and
 :::::::::::::::::::::::::::::::::
 
 :::::::::::::::::::::::: solution
+
+::::::::::::::: group-tab
+
+### DPNP (Intel)
 
 ```python
 import dpnp as np
@@ -389,10 +553,41 @@ On the laptop used for this episode:
 ```output
 NumPy: average_spectrum: 0.456 s
 DPNP:  average_spectrum: 0.312 s
+```
+
+The integrated GPU was about 1.5x faster than NumPy here. Your results may be completely different, and the integrated GPU may even be slower!
+
+### CuPy (NVIDIA or AMD)
+
+```python
+import cupy as np
+from timeit import timeit
+
+np.random.seed(1)
+signals = np.random.random((2_000, 16_384)).astype(np.float32)  # 2000 recordings
+
+def average_spectrum(signals):
+    spectra = np.abs(np.fft.rfft(signals, axis=1)) ** 2
+    result = spectra.mean(axis=0)
+    np.cuda.Device().synchronize()
+    return result
+
+average_spectrum(signals)
+print(f"average_spectrum: {timeit(lambda: average_spectrum(signals), number=10) / 10:.3f} s")
+```
+
+On the laptop used for this episode:
+
+```output
+NumPy: average_spectrum: 0.249 s
 CuPy:  average_spectrum: 0.006 s
 ```
 
-The integrated GPU was about 1.5x faster than NumPy here, while the NVIDIA card was over 70x faster. Your results may be completely different, and the integrated GPU may even be slower! The lesson is that changing the import is easy, but you should always measure before and after to check it actually helped.
+In This case the NVIDIA card was around 40x faster than NumPy here. Your results may be completely different!
+
+:::::::::::::::::::::::::::::::::
+
+The key take away here is that changing the import is easy, but you should always measure before and after to check it actually helped.
 
 :::::::::::::::::::::::::::::::::
 :::::::::::::::::::::::::::::::::::::::::::::::
@@ -610,7 +805,7 @@ For our machine this was almost twice as fast. Which is not bad for changing one
 
 - GPUs have thousands of simple cores and are good at doing the same calculation on large amounts of data, but copying data to the GPU and starting work there both have a cost.
 - DPNP can run NumPy code on Intel GPUs (including laptop integrated graphics) by changing `import numpy as np` to `import dpnp as np`. However, Its SciPy support is limited to a few functions.
-- If you have an NVIDIA graphics card, CuPy is a better choice: it is more mature and covers much more of NumPy and SciPy (via `cupyx.scipy`).
+- CuPy does the same for NVIDIA (and, on Linux, some AMD) graphics cards with `import cupy as np`. If you have one, it is the better choice: it is more mature and covers much more of NumPy and SciPy (via `cupyx.scipy`).
 - Modin runs Pandas code across all CPU cores (not the GPU) by changing `import pandas as pd` to `import modin.pandas as pd`. It helps most with row-by-row operations on large DataFrames.
 - GPUs and Modin both work in the background, so wait for them to finish when timing code.
 - Neither helps with small data, and results are very hardware dependent: always measure on your own computer.
